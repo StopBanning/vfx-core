@@ -363,13 +363,31 @@ const src = new URLSearchParams(location.search).get("src");
 if (src) { video.src = src; video.play().then(begin).catch(() => {}); }
 
 // --- the loop ------------------------------------------------------------------------
-let running = false, sized = false, last = 0, ms = 0;
+// One render per new video frame: the screen refreshes faster than video, and a repeated
+// frame is twice the work and reads to the segmenter as a moment where nothing moved.
+// The browser says when a new frame arrives where it can; where it can't (or never does),
+// a moved video clock stands in.
+let sized = false, last = 0, ms = 0, running = false, seen = -1, signalled = false, fresh = false;
+if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+  video.requestVideoFrameCallback(function arrived() {
+    signalled = fresh = true;
+    video.requestVideoFrameCallback(arrived);
+  });
+}
+function loop(now) {
+  requestAnimationFrame(loop);
+  const next = signalled ? fresh : video.currentTime !== seen;
+  if (!next) return;
+  fresh = false;
+  seen = video.currentTime;
+  tick(now);
+}
 function begin() {
   $("start").hidden = true;
   $("snap").disabled = $("record").disabled = false;
   sized = false;
   wasm.reset();
-  if (!running) { running = true; requestAnimationFrame(tick); }
+  if (!running) { running = true; requestAnimationFrame(loop); }
 }
 function fit() {
   const target = +$("size").value;
@@ -382,7 +400,6 @@ function fit() {
   sized = true;
 }
 function tick(now) {
-  requestAnimationFrame(tick);
   if (video.readyState < 2 || video.paused) return;
   if (!sized) fit();
   const { width: w, height: h } = out;
