@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>segcam Motion</title>
+<meta name="robots" content="noindex">
+<meta name="description" content="segcam's motion segmenter, live on your camera, in the browser. Rust compiled to WebAssembly.">
+<style>
+  :root {
+    --bg: #0b0c0e; --panel: #15171a; --line: #2a2d32; --text: #e8e8e6; --dim: #8b8f96;
+    --accent: #40ff66; --accent-ink: #04140a;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 var(--mono); }
+  body { min-height: 100vh; display: grid; grid-template-columns: 1fr 280px; }
+  main { position: relative; display: grid; place-items: center; padding: 16px; min-width: 0; }
+  .stage { position: relative; max-width: 100%; max-height: calc(100vh - 32px); }
+  canvas#out {
+    display: block; max-width: 100%; max-height: calc(100vh - 32px); border-radius: 6px;
+    background: repeating-conic-gradient(#16181b 0 25%, #101114 0 50%) 0 0 / 24px 24px;
+  }
+  .hud { position: absolute; left: 10px; top: 8px; color: var(--accent); font-size: 11px;
+         text-shadow: 0 1px 2px #000; pointer-events: none; letter-spacing: .04em; }
+  .start { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
+  .start[hidden] { display: none; }
+  .start h1 { font-size: 15px; font-weight: 600; letter-spacing: .12em; margin: 0 0 6px; }
+  .start p { color: var(--dim); margin: 0 0 18px; }
+  .start .row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  aside { background: var(--panel); border-left: 1px solid var(--line); padding: 16px;
+          overflow-y: auto; max-height: 100vh; }
+  aside h2 { font-size: 11px; color: var(--dim); font-weight: 500; letter-spacing: .14em;
+             text-transform: uppercase; margin: 18px 0 8px; }
+  aside h2:first-child { margin-top: 0; }
+  .brand { font-weight: 700; letter-spacing: .12em; }
+  .brand small { display: block; color: var(--dim); font-weight: 400; letter-spacing: 0; margin-top: 2px; }
+  button, .file { font: inherit; color: var(--text); background: #1d2024; border: 1px solid var(--line);
+           border-radius: 5px; padding: 7px 10px; cursor: pointer; }
+  button:hover, .file:hover { border-color: #444a52; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .modes button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .file input { display: none; }
+  label.slider { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; margin: 8px 0; }
+  label.slider span:last-of-type { color: var(--dim); }
+  label.slider input { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); }
+  label.check { display: flex; align-items: center; gap: 8px; margin: 6px 0; cursor: pointer; }
+  label.check input { accent-color: var(--accent); }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  select, input[type=color] { font: inherit; background: #1d2024; color: var(--text);
+           border: 1px solid var(--line); border-radius: 5px; padding: 5px; }
+  input[type=color] { width: 40px; height: 30px; padding: 2px; }
+  .group[hidden] { display: none; }
+  .note { color: var(--dim); font-size: 11px; margin-top: 18px; }
+  .note a { color: var(--dim); }
+  .rec { color: #ff5a5a; }
+  @media (max-width: 760px) {
+    body { grid-template-columns: 1fr; }
+    main { padding: 16px 16px 8px; }
+    aside { border-left: 0; border-top: 1px solid var(--line); max-height: none; }
+    canvas#out, .stage { max-height: 60vh; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="stage">
+    <canvas id="out" width="640" height="360"></canvas>
+    <div class="hud" id="hud"></div>
+    <div class="start" id="start">
+      <div>
+        <h1>SEGCAM MOTION</h1>
+        <p>finds whatever moves and cuts it out, live</p>
+        <div class="row">
+          <button class="primary" id="cam">Use camera</button>
+          <label class="file">Open a video<input type="file" id="file" accept="video/*"></label>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+<aside>
+  <div class="brand">segcam Motion<small>by lo.fi.sci.fi · runs on your device</small></div>
+
+  <h2>Look</h2>
+  <div class="modes" id="modes">
+    <button data-mode="0" aria-pressed="true">Overlay</button>
+    <button data-mode="1">Motion matte</button>
+    <button data-mode="2">Box matte</button>
+    <button data-mode="3">Swarm</button>
+  </div>
+
+  <h2>Motion</h2>
+  <div id="motion"></div>
+  <label class="check"><input type="checkbox" data-param="7"> Mirror</label>
+
+  <div class="group" id="overlay">
+    <h2>Overlay</h2>
+    <label class="check"><input type="checkbox" data-param="8" checked> Boxes</label>
+    <label class="check"><input type="checkbox" data-param="9" checked> Labels</label>
+    <div class="row"><input type="color" id="color" value="#40ff66"> Box colour</div>
+  </div>
+
+  <div class="group" id="swarm" hidden>
+    <h2>Swarm</h2>
+    <div id="swarmSliders"></div>
+  </div>
+
+  <h2>Source</h2>
+  <div class="row">
+    <button id="cam2">Camera</button>
+    <label class="file">Video<input type="file" id="file2" accept="video/*"></label>
+    <select id="size" title="Processing size">
+      <option value="360">360p</option>
+      <option value="480" selected>480p</option>
+      <option value="720">720p</option>
+    </select>
+  </div>
+
+  <h2>Capture</h2>
+  <div class="row">
+    <button id="snap">Save frame</button>
+    <button id="record">Record</button>
+  </div>
+
+  <p class="note">Nothing leaves your device: the effect is segcam's Rust core compiled to WebAssembly.
+    Also an After Effects, OpenFX and Resolume plugin, in <a href="https://github.com/jamecoyne/vfx-core">vfx-core</a>.</p>
+</aside>
+
+<script type="module">
+// Mirrors DEFAULTS in src/lib.rs: index, label, min, max, step, default.
+const MOTION = [
+  [1, "Sensitivity", 0, 100, 0.1, 86.4],
+  [2, "Adaptation", 0.1, 50, 0.1, 6],
+  [3, "Background frames", 1, 60, 1, 16],
+  [4, "Minimum size %", 0, 10, 0.05, 0.25],
+  [5, "Max segments", 1, 64, 1, 16],
+];
+const SWARM = [
+  [13, "Trail frames", 1, 60, 1, 24],
+  [14, "Max tiles", 1, 400, 1, 100],
+];
+
+const $ = (id) => document.getElementById(id);
+const out = $("out");
+const ctx = out.getContext("2d", { willReadFrequently: true });
+const grab = document.createElement("canvas");
+const gctx = grab.getContext("2d", { willReadFrequently: true });
+const video = document.createElement("video");
+video.muted = true; video.playsInline = true; video.loop = true;
+
+// Plain instantiate: instantiateStreaming needs the server to send application/wasm.
+const bytes = await (await fetch("segcam_motion_web.wasm")).arrayBuffer();
+const { instance } = await WebAssembly.instantiate(bytes);
+const wasm = instance.exports;
+const setParam = (i, v) => wasm.set_param(i, v);
+
+function sliders(host, list) {
+  for (const [i, name, min, max, step, value] of list) {
+    const label = document.createElement("label");
+    label.className = "slider";
+    label.innerHTML = `<span>${name}</span><span></span><input type="range" min="${min}" max="${max}" step="${step}" value="${value}">`;
+    const input = label.querySelector("input"), shown = label.querySelectorAll("span")[1];
+    const update = () => { shown.textContent = input.value; setParam(i, +input.value); };
+    input.addEventListener("input", update);
+    update();
+    host.append(label);
+  }
+}
+sliders($("motion"), MOTION);
+sliders($("swarmSliders"), SWARM);
+
+for (const box of document.querySelectorAll("input[type=checkbox][data-param]")) {
+  const update = () => setParam(+box.dataset.param, box.checked ? 1 : 0);
+  box.addEventListener("change", update);
+  update();
+}
+$("color").addEventListener("input", (e) => {
+  const hex = e.target.value;
+  [1, 3, 5].forEach((at, k) => setParam(10 + k, parseInt(hex.slice(at, at + 2), 16) / 255));
+});
+
+let mode = 0;
+$("modes").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  mode = +b.dataset.mode;
+  setParam(0, mode);
+  for (const other of $("modes").children) other.setAttribute("aria-pressed", other === b);
+  $("overlay").hidden = mode !== 0;
+  $("swarm").hidden = mode !== 3;
+});
+
+// --- sources -------------------------------------------------------------------------
+let stream = null;
+async function useCamera() {
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({
+      video: { width: 1280, height: 720, facingMode: "user" }, audio: false });
+    stopStream();
+    stream = s;
+    video.srcObject = s;
+    mirror(true); // a selfie camera reads like a mirror
+    await video.play();
+    begin();
+  } catch (err) {
+    $("hud").textContent = "camera unavailable: " + err.message;
+  }
+}
+function useFile(file) {
+  if (!file) return;
+  stopStream();
+  video.srcObject = null;
+  video.src = URL.createObjectURL(file);
+  mirror(false);
+  video.play().then(begin);
+}
+function mirror(on) {
+  const box = document.querySelector('input[data-param="7"]');
+  box.checked = on;
+  box.dispatchEvent(new Event("change"));
+}
+function stopStream() {
+  if (stream) for (const t of stream.getTracks()) t.stop();
+  stream = null;
+}
+$("cam").onclick = $("cam2").onclick = useCamera;
+$("file").onchange = $("file2").onchange = (e) => useFile(e.target.files[0]);
+// Phones get the smaller size: the swarm costs about 4x more per pixel than the rest.
+if (matchMedia("(max-width: 760px)").matches) $("size").value = "360";
+$("size").onchange = () => { sized = false; };
+video.addEventListener("seeked", () => wasm.reset());
+// ?src=clip.mp4 starts on a video, for links that show a clip.
+const src = new URLSearchParams(location.search).get("src");
+if (src) { video.src = src; video.play().then(begin).catch(() => {}); }
+
+// --- the loop ------------------------------------------------------------------------
+let running = false, sized = false, last = 0, ms = 0;
+function begin() {
+  $("start").hidden = true;
+  sized = false;
+  wasm.reset();
+  if (!running) { running = true; requestAnimationFrame(tick); }
+}
+function fit() {
+  const target = +$("size").value;
+  const vw = video.videoWidth || 640, vh = video.videoHeight || 360;
+  // The size picks the short side, so portrait video keeps its detail.
+  const k = Math.min(1, target / Math.min(vw, vh));
+  const w = Math.round(vw * k / 2) * 2, h = Math.round(vh * k / 2) * 2;
+  grab.width = out.width = w;
+  grab.height = out.height = h;
+  sized = true;
+}
+function tick(now) {
+  requestAnimationFrame(tick);
+  if (video.readyState < 2 || video.paused) return;
+  if (!sized) fit();
+  const { width: w, height: h } = out;
+  gctx.drawImage(video, 0, 0, w, h);
+  const pixels = gctx.getImageData(0, 0, w, h).data;
+
+  const t0 = performance.now();
+  const into = wasm.frame_buffer(w, h);
+  new Uint8Array(wasm.memory.buffer, into, w * h * 4).set(pixels);
+  const from = wasm.render();
+  const result = new Uint8ClampedArray(wasm.memory.buffer, from, w * h * 4);
+  ctx.putImageData(new ImageData(result, w, h), 0, 0);
+  ms = ms * 0.9 + (performance.now() - t0) * 0.1;
+
+  if (now - last > 250) {
+    last = now;
+    $("hud").innerHTML = `${w}×${h} · ${ms.toFixed(1)} ms` + (recorder ? ` · <span class="rec">● REC</span>` : "");
+  }
+}
+
+// --- capture -------------------------------------------------------------------------
+function save(blob, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+$("snap").onclick = () => out.toBlob((b) => save(b, `segcam-${Date.now()}.png`));
+
+let recorder = null;
+$("record").onclick = () => {
+  if (recorder) { recorder.stop(); return; }
+  const type = ["video/mp4;codecs=avc1", "video/webm;codecs=vp9", "video/webm"]
+    .find((t) => MediaRecorder.isTypeSupported(t));
+  const chunks = [];
+  recorder = new MediaRecorder(out.captureStream(30), { mimeType: type, videoBitsPerSecond: 12e6 });
+  recorder.ondataavailable = (e) => chunks.push(e.data);
+  recorder.onstop = () => {
+    save(new Blob(chunks, { type }), `segcam-${Date.now()}.${type.startsWith("video/mp4") ? "mp4" : "webm"}`);
+    recorder = null;
+    $("record").textContent = "Record";
+  };
+  recorder.start();
+  $("record").textContent = "Stop";
+};
+</script>
+</body>
+</html>
